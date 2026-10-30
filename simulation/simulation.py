@@ -4,7 +4,14 @@ import random
 import time
 from datetime import datetime, timezone
 
-# Rough waypoints around Ibadan (lat, lng)
+import paho.mqtt.client as mqtt
+
+# ---------- MQTT settings ----------
+MQTT_HOST = "localhost"
+MQTT_PORT = 1883
+TOPIC_TEMPLATE = "fleet/vehicles/{vehicle_id}/telemetry"
+
+# ---------- Simulation settings ----------
 WAYPOINTS = [
     (7.3775, 3.9470),  # Dugbe
     (7.4430, 3.9000),  # Ibadan North / UI area
@@ -16,9 +23,9 @@ WAYPOINTS = [
 
 TICK_SECONDS = 1.0
 NUM_VEHICLES = 5
-MOVING_THRESHOLD_KMH = 5     # above this speed, the car counts as "moving"
-OVERSPEED_LIMIT_KMH = 100    # above this = overspeed event
-HARSH_BRAKE_DROP_KMH = 25    # speed drop in one tick that counts as harsh braking
+MOVING_THRESHOLD_KMH = 5
+OVERSPEED_LIMIT_KMH = 100
+HARSH_BRAKE_DROP_KMH = 25
 
 
 def haversine_km(a, b):
@@ -45,26 +52,25 @@ class Vehicle:
         self.vehicle_id = vehicle_id
         self.pos = random.choice(WAYPOINTS)
         self.target = random.choice([w for w in WAYPOINTS if w != self.pos])
-        self.speed = 0.0          # km/h
-        self.prev_speed = 0.0     # speed on the previous tick (used to detect harsh braking)
+        self.speed = 0.0
+        self.prev_speed = 0.0
         self.target_speed = random.uniform(30, 70)
-        self.fuel = random.uniform(40, 100)  # percent
-        self.coolant = 30.0       # starts cold
+        self.fuel = random.uniform(40, 100)
+        self.coolant = 30.0
         self.ignition = True
-        self.idle_ticks = 0       # countdown for stops
+        self.idle_ticks = 0
 
-        # --- trip tracking ---
+        # trip tracking
         self.trip_count = 0
         self.trip_id = None
         self.was_moving = False
 
-        # --- bad driving ---
-        self.overspeed_ticks = 0  # countdown while the driver is "flooring it"
-        self.event = None         # "harsh_brake", "overspeed", or None
+        # bad driving
+        self.overspeed_ticks = 0
+        self.event = None
 
     def _pick_new_target(self):
         self.target = random.choice([w for w in WAYPOINTS if w != self.target])
-        # don't reset the speed target while the driver is overspeeding
         if self.overspeed_ticks == 0:
             self.target_speed = random.uniform(30, 70)
 
@@ -80,7 +86,6 @@ class Vehicle:
         self.was_moving = moving
 
     def _detect_event(self):
-        """Look at what just happened and label it, like a real tracker would."""
         drop = self.prev_speed - self.speed
 
         if drop >= HARSH_BRAKE_DROP_KMH:
@@ -93,36 +98,28 @@ class Vehicle:
     def step(self, dt):
         self.prev_speed = self.speed
 
-        # Handle idling stops (e.g. traffic, drop-offs)
         if self.idle_ticks > 0:
             self.idle_ticks -= 1
             self.speed = max(0.0, self.speed - 15)
         else:
-            # Count down an overspeeding episode
             if self.overspeed_ticks > 0:
                 self.overspeed_ticks -= 1
                 if self.overspeed_ticks == 0:
-                    self.target_speed = random.uniform(30, 70)  # calm down
+                    self.target_speed = random.uniform(30, 70)
 
-            # Accelerate/decelerate toward target speed with some noise
             diff = self.target_speed - self.speed
             self.speed += max(-12, min(8, diff)) + random.uniform(-2, 2)
             self.speed = max(0.0, self.speed)
 
-            # BAD DRIVING 1: sudden hard braking (only possible when going fast)
             if self.speed > 50 and random.random() < 0.02:
                 self.speed = max(10.0, self.speed - random.uniform(30, 45))
-
-            # BAD DRIVING 2: driver decides to speed for a while
             elif self.overspeed_ticks == 0 and random.random() < 0.01:
                 self.overspeed_ticks = random.randint(15, 30)
                 self.target_speed = random.uniform(105, 120)
 
-            # Occasionally stop for a bit
             if random.random() < 0.005:
                 self.idle_ticks = random.randint(10, 30)
 
-        # Move toward target
         dist_remaining = haversine_km(self.pos, self.target)
         step_km = (self.speed / 3600) * dt
 
@@ -136,11 +133,9 @@ class Vehicle:
                 self.pos[1] + (self.target[1] - self.pos[1]) * frac,
             )
 
-        # Fuel burn: idle burns a little, driving burns more
         burn = 0.0005 + (self.speed / 100) * 0.002
         self.fuel = max(0.0, self.fuel - burn)
 
-        # Coolant warms toward ~90C, cools slightly when slow
         target_temp = 90 if self.speed > 5 else 85
         self.coolant += (target_temp - self.coolant) * 0.02
 
@@ -149,7 +144,7 @@ class Vehicle:
 
     def rpm(self):
         if self.speed < 1:
-            return random.randint(750, 900)  # idle
+            return random.randint(750, 900)
         return int(900 + self.speed * 30 + random.uniform(-100, 100))
 
     def payload(self):
@@ -169,18 +164,35 @@ class Vehicle:
         }
 
 
+def connect_mqtt():
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="fleet-simulator")
+    client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
+    client.loop_start()  # handles network stuff in the background
+    return client
+
+
 def main():
+    client = connect_mqtt()
     fleet = [Vehicle(f"VEH-{i:03d}") for i in range(1, NUM_VEHICLES + 1)]
-    print(f"Simulating {NUM_VEHICLES} vehicles. Ctrl+C to stop.\n")
+    print(f"Publishing {NUM_VEHICLES} vehicles to MQTT at {MQTT_HOST}:{MQTT_PORT}. Ctrl+C to stop.\n")
 
     try:
         while True:
             for v in fleet:
                 v.step(TICK_SECONDS)
-                print(json.dumps(v.payload()))
+                data = v.payload()
+                topic = TOPIC_TEMPLATE.format(vehicle_id=v.vehicle_id)
+                client.publish(topic, json.dumps(data), qos=0)
+
+                # only print the interesting stuff so the terminal stays readable
+                if data["event"]:
+                    print(f"[{data['vehicle_id']}] {data['event']} at {data['speed_kmh']} km/h")
             time.sleep(TICK_SECONDS)
     except KeyboardInterrupt:
         print("\nStopped.")
+    finally:
+        client.loop_stop()
+        client.disconnect()
 
 
 if __name__ == "__main__":

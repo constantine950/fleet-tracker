@@ -76,9 +76,9 @@ def save(t: Telemetry):
 
 # ---------- 3. MQTT: listen for messages ----------
 def on_connect(client, userdata, flags, reason_code, properties):
-    print(f"MQTT connected ({reason_code}). Subscribing to {SUBSCRIBE_TOPIC}")
-    # subscribe inside on_connect so it re-subscribes automatically after a reconnect
-    client.subscribe(SUBSCRIBE_TOPIC, qos=0)
+    print(f"MQTT connected ({reason_code}). session_present={flags.session_present}")
+    # QoS 1 so the broker queues messages while we're offline
+    client.subscribe(SUBSCRIBE_TOPIC, qos=1)
 
 
 def on_message(client, userdata, msg):
@@ -86,13 +86,17 @@ def on_message(client, userdata, msg):
         data = json.loads(msg.payload)
         telemetry = Telemetry(**data)
     except (json.JSONDecodeError, ValidationError, TypeError) as e:
-        # a real system would log this somewhere; bad data must never crash the service
         print(f"Rejected bad message on {msg.topic}: {e}")
         return
     save(telemetry)
 
 
-mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+# fixed client_id + clean_session=False = the broker remembers us between restarts
+mqtt_client = mqtt.Client(
+    mqtt.CallbackAPIVersion.VERSION2,
+    client_id="fleet-backend",
+    clean_session=False,
+)
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
 

@@ -182,7 +182,7 @@ def main():
                 v.step(TICK_SECONDS)
                 data = v.payload()
                 topic = TOPIC_TEMPLATE.format(vehicle_id=v.vehicle_id)
-                client.publish(topic, json.dumps(data), qos=0)
+                client.publish(topic, json.dumps(data), qos=1)
 
                 # only print the interesting stuff so the terminal stays readable
                 if data["event"]:
